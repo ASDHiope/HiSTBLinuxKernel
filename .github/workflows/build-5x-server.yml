@@ -1,4 +1,4 @@
-name: Build hi_kernel-mv100-32.bin (Linux 5.x)
+name: Build hi_kernel-mv100-32.bin (Linux 5.x EarlyCon)
 
 on:
   push:
@@ -66,35 +66,20 @@ jobs:
                 mkdir -p "${BINDINGS_DST}/${subdir}"
                 cp -v "${BINDINGS_SRC}/${subdir}/"*hi3798* "${BINDINGS_DST}/${subdir}/" 2>/dev/null || true
                 cp -v "${BINDINGS_SRC}/${subdir}/"*hisi* "${BINDINGS_DST}/${subdir}/" 2>/dev/null || true
-                # 拷贝该目录下所有非海思专属但可能被引用的通用头文件
                 cp -rn "${BINDINGS_SRC}/${subdir}/"* "${BINDINGS_DST}/${subdir}/" 2>/dev/null || true
               fi
             done
           fi
           
-          echo ">>> Extracted dt-bindings:"
-          find "${BINDINGS_DST}" -type f | sort
-
           echo ">>> Downloading stable kernel ${KERNEL_TAG}..."
           git clone --single-branch --branch ${KERNEL_TAG} \
             ${KERNEL_REPO} /tmp/kernel-src
 
-          # 拷贝 DTS/DTSI 到内核源码树
           cp -v dts/*.dts dts/*.dtsi /tmp/kernel-src/arch/arm/boot/dts/ 2>/dev/null || true
-
-          # ✅ 注入私有 dt-bindings（-n 确保不覆盖主线已有文件）
           echo ">>> Injecting private dt-bindings into kernel tree..."
           cp -rn "${BINDINGS_DST}/"* /tmp/kernel-src/include/dt-bindings/ 2>/dev/null || true
-          
-          if [ ! -f "/tmp/kernel-src/include/dt-bindings/clock/hi3798mv100-clock.h" ]; then
-            echo "::warning::hi3798mv100-clock.h not found after injection!"
-            ls -la /tmp/kernel-src/include/dt-bindings/clock/*hi3798* 2>/dev/null || true
-            ls -la "${BINDINGS_DST}/clock/" 2>/dev/null || true
-          else
-            echo ">>> ✅ hi3798mv100-clock.h successfully injected"
-          fi
 
-          # 检测 DTB 名称（绝不修改 Makefile）
+          # 检测 DTB 名称
           MAIN_DTS=""
           for pattern in "hi3798mv100" "hi3798mdmo1f" "hi3798cv200" "hi3798"; do
             MATCH=$(ls dts/${pattern}*.dts 2>/dev/null | head -1)
@@ -125,7 +110,7 @@ jobs:
             python3 lzop u-boot-tools swig libelf-dev
 
       # ============================================================
-      # Step 3: 配置内核
+      # Step 3: 配置内核 (✅ 注入 Early Console 与强制命令行)
       # ============================================================
       - name: Configure Kernel for Headless Server + Docker
         working-directory: /tmp/kernel-src
@@ -157,10 +142,21 @@ jobs:
           ./scripts/config --enable STMMAC_ETH --enable PHYLIB
           ./scripts/config --enable IKCONFIG --enable IKCONFIG_PROC
 
+          # ✅ 核心修复：开启 Early Console 调试选项
+          ./scripts/config --enable EARLY_PRINTK
+          ./scripts/config --enable DEBUG_LL
+          ./scripts/config --enable DEBUG_LL_UART_8250
+          ./scripts/config --enable DEBUG_UART_8250
+
+          # ✅ 核心修复：硬编码启动参数，强制忽略 Fastboot 传入的 ATAGS
+          # 0xf8b00000 为 Hi3798MV100 UART0 物理基地址
+          ./scripts/config --set-str CONFIG_CMDLINE "earlycon=pl011,0xf8b00000 console=ttyAMA0,115200n8 root=/dev/mmcblk0p2 rootwait"
+          ./scripts/config --enable CMDLINE_FORCE
+
           make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} olddefconfig
 
       # ============================================================
-      # Step 4: 分步编译 zImage 和 DTB（绕过 Makefile 注入）
+      # Step 4: 分步编译 zImage 和 DTB
       # ============================================================
       - name: Compile zImage
         working-directory: /tmp/kernel-src
@@ -187,7 +183,6 @@ jobs:
             exit 1
           fi
 
-          # cpp 预处理 + dtc 编译，等价于内核原生 %.dtb 规则
           CPP_FLAGS="-nostdinc -I include -I arch/arm/include -I arch/arm/include/generated -undef -x assembler-with-cpp"
           
           echo ">>> Step 1: Preprocessing DTS..."
