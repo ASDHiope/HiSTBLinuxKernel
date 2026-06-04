@@ -1,4 +1,4 @@
-name: Build hi_kernel-mv100-32.bin (Linux 5.x EarlyCon)
+name: Build hi_kernel-mv100-32.bin (Linux 5.x EarlyCon + ccache)
 
 on:
   push:
@@ -31,17 +31,37 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90  # ✅ 作业级别全局超时设置（防止超过6小时被系统强制取消）
+    timeout-minutes: 180  # ✅ 全局作业超时放宽至 3 小时
 
     steps:
       - name: Checkout current repo
         uses: actions/checkout@v4
 
       # ============================================================
+      # Step 0: 清理磁盘空间 & 安装基础依赖
+      # ============================================================
+      - name: Free Disk Space & Install Dependencies
+        timeout-minutes: 15
+        run: |
+          echo ">>> Removing unnecessary packages to free disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
+            bison flex libssl-dev bc kmod cpio device-tree-compiler \
+            python3 lzop u-boot-tools swig libelf-dev ccache
+
+          # 初始化 ccache
+          mkdir -p ~/.ccache
+          ccache --set-config=max_size=2G
+          ccache --zero-stats
+
+      # ============================================================
       # Step 1: 准备内核源码、DTS 及私有头文件
       # ============================================================
       - name: Prepare Kernel Source and DTS
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: |
           echo ">>> Cloning DTS source from ${DTS_SOURCE_REPO}:${DTS_SOURCE_BRANCH}..."
           git clone --depth 1 --branch ${DTS_SOURCE_BRANCH} \
@@ -56,7 +76,6 @@ jobs:
             cp -rv /tmp/dts-source/dts/* dts/
           fi
 
-          # ✅ 提取海思私有 dt-bindings 头文件
           echo ">>> Extracting private dt-bindings headers..."
           BINDINGS_SRC="/tmp/dts-source/include/dt-bindings"
           BINDINGS_DST="dt-bindings-overlay"
@@ -81,7 +100,6 @@ jobs:
           echo ">>> Injecting private dt-bindings into kernel tree..."
           cp -rn "${BINDINGS_DST}/"* /tmp/kernel-src/include/dt-bindings/ 2>/dev/null || true
 
-          # 检测 DTB 名称
           MAIN_DTS=""
           for pattern in "hi3798mv100" "hi3798mdmo1f" "hi3798cv200" "hi3798"; do
             MATCH=$(ls dts/${pattern}*.dts 2>/dev/null | head -1)
@@ -98,22 +116,10 @@ jobs:
           fi
 
           echo "MAIN_DTB=${MAIN_DTS}.dtb" >> $GITHUB_ENV
-          echo ">>> Selected DTB: ${MAIN_DTS}.dtb"
+          echo ">>> Selected DTB: ${MAIN_DTB}.dtb"
 
       # ============================================================
-      # Step 2: 安装工具链
-      # ============================================================
-      - name: Install Toolchain & Dependencies
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
-            bison flex libssl-dev bc kmod cpio device-tree-compiler \
-            python3 lzop u-boot-tools swig libelf-dev
-
-      # ============================================================
-      # Step 3: 配置内核 (✅ 注入 Early Console 与强制命令行)
+      # Step 2: 配置内核 (Early Console + Docker Support)
       # ============================================================
       - name: Configure Kernel for Headless Server + Docker
         working-directory: /tmp/kernel-src
@@ -121,13 +127,11 @@ jobs:
         run: |
           make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} multi_v7_defconfig
 
-          # 禁用 VDEC/GPU/HDMI/音频
           ./scripts/config --disable DRM --disable DRM_MALI --disable DRM_LIMA --disable DRM_PANFROST
           ./scripts/config --disable FB --disable FRAMEBUFFER_CONSOLE --disable LOGO
           ./scripts/config --disable SOUND --disable SND_SOC
           ./scripts/config --disable MEDIA_SUPPORT --disable VIDEO_DEV --disable V4L_PLATFORM_DRIVERS
 
-          # Docker 必需选项
           ./scripts/config --enable NAMESPACES --enable NET_NS --enable PID_NS --enable IPC_NS
           ./scripts/config --enable UTS_NS --enable USER_NS --enable CGROUPS --enable MEMCG
           ./scripts/config --enable CGROUP_CPUACCT --enable CGROUP_DEVICE --enable CGROUP_FREEZER
@@ -141,39 +145,42 @@ jobs:
           ./scripts/config --enable OVERLAY_FS --enable EXT4_FS --enable TMPFS_POSIX_ACL
           ./scripts/config --enable BLK_DEV_DM --enable DM_THIN_PROVISIONING --enable BTRFS_FS
 
-          # 以太网驱动
           ./scripts/config --enable NET_VENDOR_HISILICON --enable HNS_MDIO --enable HNS
           ./scripts/config --enable STMMAC_ETH --enable PHYLIB
           ./scripts/config --enable IKCONFIG --enable IKCONFIG_PROC
 
-          # ✅ 核心修复：开启 Early Console 调试选项
           ./scripts/config --enable EARLY_PRINTK
           ./scripts/config --enable DEBUG_LL
           ./scripts/config --enable DEBUG_LL_UART_8250
           ./scripts/config --enable DEBUG_UART_8250
 
-          # ✅ 核心修复：硬编码启动参数，强制忽略 Fastboot 传入的 ATAGS
-          # 0xf8b00000 为 Hi3798MV100 UART0 物理基地址
           ./scripts/config --set-str CONFIG_CMDLINE "earlycon=pl011,0xf8b00000 console=ttyAMA0,115200n8 root=/dev/mmcblk0p2 rootwait"
           ./scripts/config --enable CMDLINE_FORCE
 
           make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} olddefconfig
 
       # ============================================================
-      # Step 4: 分步编译 zImage 和 DTB
+      # Step 3: 使用 ccache 编译 zImage
       # ============================================================
-      - name: Compile zImage
+      - name: Compile zImage with ccache
         working-directory: /tmp/kernel-src
-        timeout-minutes: 45  # ✅ 步骤级别超时设置
+        timeout-minutes: 120  # ✅ 给予充足的编译时间
+        env:
+          CCACHE_DIR: ~/.ccache
         run: |
-          echo ">>> Building zImage only..."
-          make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
+          echo ">>> Building zImage with ccache acceleration..."
+          make ARCH=${ARCH} CROSS_COMPILE="${CROSS_COMPILE}" \
             CFLAGS="${TARGET_CFLAGS}" \
-            zImage -j$(nproc) 2>&1 | tail -30
+            CC="ccache arm-linux-gnueabihf-gcc" \
+            zImage -j3 2>&1 | tail -50
           
           test -f arch/arm/boot/zImage || { echo "::error::zImage build failed!"; exit 1; }
           ls -lh arch/arm/boot/zImage
+          ccache -s
 
+      # ============================================================
+      # Step 4: 独立编译 DTB
+      # ============================================================
       - name: Compile DTB Independently
         working-directory: /tmp/kernel-src
         timeout-minutes: 10
@@ -191,13 +198,11 @@ jobs:
 
           CPP_FLAGS="-nostdinc -I include -I arch/arm/include -I arch/arm/include/generated -undef -x assembler-with-cpp"
           
-          echo ">>> Step 1: Preprocessing DTS..."
           ${CROSS_COMPILE}gcc -E ${CPP_FLAGS} \
             -D__ASSEMBLY__ \
             -include include/linux/kconfig.h \
             "$DTS_FILE" -o /tmp/preprocessed.dts
           
-          echo ">>> Step 2: Compiling DTB..."
           scripts/dtc/dtc \
             -O dtb \
             -b 0 \
@@ -207,32 +212,4 @@ jobs:
             /tmp/preprocessed.dts
           
           test -f "$DTB_FILE" || { echo "::error::DTB compilation failed!"; exit 1; }
-          ls -lh "$DTB_FILE"
-
-      # ============================================================
-      # Step 5: 打包为海思刷机格式
-      # ============================================================
-      - name: Pack hi_kernel-mv100-32.bin
-        working-directory: /tmp/kernel-src
-        timeout-minutes: 5
-        run: |
-          cat arch/arm/boot/zImage arch/arm/boot/dts/${MAIN_DTB} > /tmp/zImage-dtb
-          mkimage -A arm -O linux -T kernel -C none \
-            -a 0x02000000 -e 0x02000000 \
-            -n "Linux-5.x-Hi3798MV100-Server" \
-            -d /tmp/zImage-dtb ${{ env.OUTPUT_BIN }}
-          ls -lh ${{ env.OUTPUT_BIN }}
-          file ${{ env.OUTPUT_BIN }}
-          cp ${{ env.OUTPUT_BIN }} ${{ github.workspace }}/
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: hi_kernel-mv100-32
-          path: hi_kernel-mv100-32.bin
-          retention-days: 30
-
-      - name: Print Checksum
-        run: |
-          sha256sum hi_kernel-mv100-32.bin
-          md5sum hi_kernel-mv100-32.bin
+          ls -lh "$
