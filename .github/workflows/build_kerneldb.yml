@@ -56,6 +56,8 @@ jobs:
           scripts/config --enable CONFIG_CAPABILITIES
           scripts/config --enable CONFIG_MODULES
           scripts/config --enable CONFIG_MODULE_UNLOAD
+          # =====核心修复：自动填充新增配置，避免交互弹窗=====
+          make olddefconfig
           make savedefconfig
           cp defconfig arch/arm/configs/hi3798mv100_nodisp_docker_defconfig
 
