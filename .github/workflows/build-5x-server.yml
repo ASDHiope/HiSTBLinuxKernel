@@ -31,6 +31,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 90  # ✅ 作业级别全局超时设置（防止超过6小时被系统强制取消）
 
     steps:
       - name: Checkout current repo
@@ -40,6 +41,7 @@ jobs:
       # Step 1: 准备内核源码、DTS 及私有头文件
       # ============================================================
       - name: Prepare Kernel Source and DTS
+        timeout-minutes: 15
         run: |
           echo ">>> Cloning DTS source from ${DTS_SOURCE_REPO}:${DTS_SOURCE_BRANCH}..."
           git clone --depth 1 --branch ${DTS_SOURCE_BRANCH} \
@@ -102,6 +104,7 @@ jobs:
       # Step 2: 安装工具链
       # ============================================================
       - name: Install Toolchain & Dependencies
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -114,6 +117,7 @@ jobs:
       # ============================================================
       - name: Configure Kernel for Headless Server + Docker
         working-directory: /tmp/kernel-src
+        timeout-minutes: 5
         run: |
           make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} multi_v7_defconfig
 
@@ -160,6 +164,7 @@ jobs:
       # ============================================================
       - name: Compile zImage
         working-directory: /tmp/kernel-src
+        timeout-minutes: 45  # ✅ 步骤级别超时设置
         run: |
           echo ">>> Building zImage only..."
           make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
@@ -171,6 +176,7 @@ jobs:
 
       - name: Compile DTB Independently
         working-directory: /tmp/kernel-src
+        timeout-minutes: 10
         run: |
           echo ">>> Building ${MAIN_DTB} using direct dtc compilation..."
           
@@ -208,6 +214,7 @@ jobs:
       # ============================================================
       - name: Pack hi_kernel-mv100-32.bin
         working-directory: /tmp/kernel-src
+        timeout-minutes: 5
         run: |
           cat arch/arm/boot/zImage arch/arm/boot/dts/${MAIN_DTB} > /tmp/zImage-dtb
           mkimage -A arm -O linux -T kernel -C none \
