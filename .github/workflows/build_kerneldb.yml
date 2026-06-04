@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-kernel:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     env:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
@@ -20,7 +20,7 @@ jobs:
       - name: Install build deps + Linaro cross toolchain
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential gcc g++ make libncurses-dev bison flex libssl-dev libelf-dev bc git wget unzip lz4 cpio
+          sudo apt install -y build-essential gcc g++ make libncurses-dev bison flex libssl-dev libelf-dev bc git wget unzip lz4 cpio device-tree-compiler
           wget https://releases.linaro.org/components/toolchain/binaries/latest-7/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
           tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
           echo "/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin" >> $GITHUB_PATH
@@ -32,19 +32,19 @@ jobs:
       - name: Custom defconfig (Disable GPU/VDEC/HDMI, enable eth+docker)
         run: |
           make hi3798mv100_defconfig
-          # 关闭显示/多媒体
+          # 关闭显示多媒体
           scripts/config --disable CONFIG_HI_VDEC
           scripts/config --disable CONFIG_HI_GPU
           scripts/config --disable CONFIG_HI_HDMI
           scripts/config --disable CONFIG_FB
           scripts/config --disable CONFIG_DRM
           scripts/config --disable CONFIG_VIDEO_HI
-          # 网卡开启
+          # 开启以太网
           scripts/config --enable CONFIG_NET
           scripts/config --enable CONFIG_ETHERNET
           scripts/config --enable CONFIG_HI_ETH
           scripts/config --enable CONFIG_PHYLIB
-          # Docker必须内核选项
+          # Docker内核必备
           scripts/config --enable CONFIG_CGROUPS
           scripts/config --enable CONFIG_CGROUP_FREEZER
           scripts/config --enable CONFIG_CGROUP_PIDS
@@ -56,7 +56,7 @@ jobs:
           scripts/config --enable CONFIG_CAPABILITIES
           scripts/config --enable CONFIG_MODULES
           scripts/config --enable CONFIG_MODULE_UNLOAD
-          # =====核心修复：自动填充新增配置，避免交互弹窗=====
+          # CI静默填充配置，杜绝交互
           make olddefconfig
           make savedefconfig
           cp defconfig arch/arm/configs/hi3798mv100_nodisp_docker_defconfig
