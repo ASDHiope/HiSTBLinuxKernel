@@ -1,0 +1,90 @@
+name: Build Hi3798MV100 Linux5.x Kernel bin
+on:
+  push:
+    branches: [ main, linux-5.x ]
+  workflow_dispatch: # 支持手动触发编译
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          repository: ASDHiope/HiSTBLinuxKernel
+          fetch-depth: 0
+
+      - name: Install cross compile toolchain & build deps
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential gcc g++ make libncurses-dev bison flex libssl-dev libelf-dev bc git wget unzip lz4 cpio
+          # 安装海思MV100 ARM32交叉编译器(hi3798mv100专用arm-linux-gnueabihf)
+          wget https://releases.linaro.org/components/toolchain/binaries/latest-7/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
+          tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
+          echo "/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin" >> $GITHUB_PATH
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export ARCH=arm
+
+      - name: Switch to Linux5.x branch(关键：切换5.x内核源码分支，替换为你仓库实际5.x分支名)
+        run: |
+          git checkout linux-5.x
+          # 若无预先5.x分支，自行基于上游拉取5.x基线：git fetch origin && git checkout -b linux-5.x
+
+      - name: Generate custom defconfig(禁用GPU/VDEC/HDMI，启用网卡+Docker必需内核选项)
+        run: |
+          # 1.基于mv100原始defconfig生成配置
+          make hi3798mv100_defconfig
+          # 2.批量关闭无用模块：HDMI/GPU/VDEC显示相关
+          scripts/config --disable CONFIG_HI_VDEC
+          scripts/config --disable CONFIG_HI_GPU
+          scripts/config --disable CONFIG_HI_HDMI
+          scripts/config --disable CONFIG_FB
+          scripts/config --disable CONFIG_DRM
+          scripts/config --disable CONFIG_VIDEO_HI
+          scripts/config --disable CONFIG_INPUT_KEYBOARD
+          # 3.启用以太网PHY/网口驱动
+          scripts/config --enable CONFIG_NET
+          scripts/config --enable CONFIG_ETHERNET
+          scripts/config --enable CONFIG_HI_ETH
+          scripts/config --enable CONFIG_PHYLIB
+          # 4.Docker强制依赖内核配置：cgroup、overlayfs、namespace、capabilities
+          scripts/config --enable CONFIG_CGROUPS
+          scripts/config --enable CONFIG_CGROUP_FREEZER
+          scripts/config --enable CONFIG_CGROUP_PIDS
+          scripts/config --enable CONFIG_CGROUP_DEVICE
+          scripts/config --enable CONFIG_NAMESPACES
+          scripts/config --enable CONFIG_OVERLAY_FS
+          scripts/config --enable CONFIG_POSIX_MQUEUE
+          scripts/config --enable CONFIG_SECCOMP
+          scripts/config --enable CONFIG_CAPABILITIES
+          # 5.开启模块编译，方便后续安装deb/ipk软件包
+          scripts/config --enable CONFIG_MODULES
+          scripts/config --enable CONFIG_MODULE_UNLOAD
+          # 保存修改后的defconfig，方便后续复用
+          make savedefconfig
+          cp defconfig arch/arm/configs/hi3798mv100_nodisp_docker_defconfig
+
+      - name: Compile Linux5.x Kernel Image
+        run: |
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export ARCH=arm
+          make -j$(nproc) zImage
+          # 海思专用打包生成hi_kernel-mv100-32.bin（MV100固件标准内核bin格式）
+          # 调用海思mkimage工具，无内置则下载hi3798专用mkimg打包脚本
+          [ ! -f mkimage ] && wget https://github.com/ASDHiope/HiSTBLinuxKernel/raw/linux-4.4.y/tools/mkimage && chmod +x mkimage
+          ./mkimage -A arm -O linux -T kernel -C none -a 0x40008000 -e 0x40008000 -n Linux5.x-MV100 -d arch/arm/boot/zImage hi_kernel-mv100-32.bin
+
+      - name: Upload compiled kernel bin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi_kernel-mv100-32-bin
+          path: hi_kernel-mv100-32.bin
+
+      - name: Release to Github Release(可选：编译成功自动发布bin到Release)
+        if: github.ref == 'refs/heads/linux-5.x'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: hi_kernel-mv100-32.bin
+          tag_name: kernel-mv100-5.x-${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
