@@ -1,7 +1,5 @@
 name: Build Hi3798MV100 Linux5.x Kernel bin
 on:
-  push:
-    branches: [ main, linux-5.x ]
   workflow_dispatch: # 支持手动触发编译
 
 jobs:
